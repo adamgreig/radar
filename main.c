@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <string.h>
 #include <math.h>
+#include <pthread.h>
 #include "libbladeRF.h"
 
 #define KNRM "\x1B[0m"
@@ -38,6 +39,15 @@ struct bladerf_stream_data
     bladerf_module module;
     FILE           *fout;
     int            samples_left;
+};
+
+struct bladerf_thread_data
+{
+    struct bladerf* dev;
+    struct bladerf_stream* stream;
+    struct bladerf_stream_data* stream_data;
+    pthread_mutex_t lock;
+    int rv;
 };
 
 
@@ -256,10 +266,12 @@ void* stream_cb(struct bladerf *dev, struct bladerf_stream *stream,
                 void *user_data)
 {
     struct bladerf_stream_data *data = user_data; 
+    size_t i;
+    int16_t *sample = samples;
 
     if(data->module == BLADERF_MODULE_RX) {
-        size_t i;
-        int16_t *sample = samples;
+        printf("r");
+        fflush(stdout);
         for(i=0; i<n_samples; i++) {
             *sample &= 0x0fff;
             if(*sample & 0x0800)
@@ -270,11 +282,22 @@ void* stream_cb(struct bladerf *dev, struct bladerf_stream *stream,
             fwrite(sample, 2, 2, data->fout);
             sample += 2;
         }
-        data->samples_left -= n_samples;
-        if(data->samples_left <= 0) {
-            return NULL;
-        }
     } else {
+        printf("t");
+        fflush(stdout);
+        memset(samples, 0, n_samples * 2 * 2);
+        for(i=0; i<n_samples/200 - 1; i++) {
+            sample[i*2*200 + 0] = 2048;
+            sample[i*2*200 + 2] = 2048;
+            sample[i*2*200 + 4] = 2048;
+            sample[i*2*200 + 6] = 2048;
+            sample[i*2*200 + 8] = 2048;
+        }
+    }
+
+    data->samples_left -= n_samples;
+    if(data->samples_left <= 0) {
+        return NULL;
     }
 
     void *rv = data->buffers[data->next_buffer];
@@ -288,7 +311,7 @@ int setup_rx_stream(struct bladerf* dev, struct bladerf_stream* stream,
 {
     int status;
 
-    printf("%-10s %-36s...", "Opening", output_filename);
+    printf("%-10s %-39s", "Opening", output_filename);
     fflush(stdout);
     stream_data->fout = fopen(output_filename, "wb");
     if(!stream_data->fout) {
@@ -345,20 +368,46 @@ int setup_tx_stream(struct bladerf* dev, struct bladerf_stream* stream,
 }
 
 
+void* txrx_thread(void* arg)
+{
+    struct bladerf_thread_data* thread_data = (struct bladerf_thread_data*)arg;
+
+    thread_data->rv = setup_tx_stream(thread_data->dev, thread_data->stream,
+                                      thread_data->stream_data);
+    if(thread_data->rv) {
+        return NULL;
+    }
+
+    pthread_mutex_lock(&(thread_data->lock));
+
+    thread_data->rv = bladerf_stream(thread_data->dev,
+                                     thread_data->stream_data->module,
+                                     BLADERF_FORMAT_SC16_Q12,
+                                     thread_data->stream);
+
+    pthread_mutex_unlock(&(thread_data->lock));
+    return NULL;
+}
+
+
 int main(int argc, char* argv) {
+    int status;
     struct bladerf *dev;
     struct bladerf_config cfg;
     struct bladerf_stream* tx_stream;
     struct bladerf_stream* rx_stream;
     struct bladerf_stream_data tx_stream_data;
     struct bladerf_stream_data rx_stream_data;
-    int status;
+    struct bladerf_thread_data tx_thread_data;
+    struct bladerf_thread_data rx_thread_data;
+    pthread_t tx_thread_pth;
+    pthread_t rx_thread_pth;
 
     cfg.tx_freq = 3410000000;  // 3.41GHz TX puts us a bit into the band
     cfg.rx_freq = 3400000000;  // 3.40GHz RX puts the TX signals away from LO
     cfg.tx_bw = 28000000;      // Full bandwidth on TX for sharp pulses
     cfg.rx_bw = 28000000;      // Full bandwidth on RX for sharp returns
-    cfg.tx_sr = 10000000;      // 10MS/s will do for TXing pulses
+    cfg.tx_sr = 40000000;      // 10MS/s will do for TXing pulses
     cfg.rx_sr = 40000000;      // 40MS/s for RX for best possible resolution
     cfg.txvga1 = -14;          // Default
     cfg.txvga2 = 0;            // Default
@@ -370,47 +419,101 @@ int main(int argc, char* argv) {
         return 1;
     }
 
-    tx_stream_data.num_buffers        = 1;
+    tx_stream_data.num_buffers        = 2;
     tx_stream_data.samples_per_buffer = 1048576;   //    1MS
-    tx_stream_data.samples_left       = 2621440;   //  2.5MS
+//  tx_stream_data.samples_left       = 2621440;   //  2.5MS
+    tx_stream_data.samples_left       = 10485760;  //   10MS
 
+    /*
     if(setup_tx_stream(dev, tx_stream, &tx_stream_data)) {
         return 1;
     }
+    */
 
     rx_stream_data.num_buffers        = 2;
     rx_stream_data.samples_per_buffer = 1048576;   //    1MS
     rx_stream_data.samples_left       = 10485760;  //   10MS
 
+    /*
     if(setup_rx_stream(dev, rx_stream, &rx_stream_data)) {
         return 1;
     }
+    */
+
+    tx_thread_data.dev = dev;
+    tx_thread_data.stream = tx_stream;
+    tx_thread_data.stream_data = &tx_stream_data;
+    pthread_mutex_init(&(tx_thread_data.lock), NULL);
+    pthread_mutex_lock(&(tx_thread_data.lock));
+
+    printf("%-50s", "Creating TX thread... ");
+    status = pthread_create(&tx_thread_pth, NULL, txrx_thread,
+                            &tx_thread_data);
+    if(status) {
+        printf(KRED "Failed: %s" KNRM "\n", strerror(status));
+        enable(&dev, false);
+        bladerf_deinit_stream(rx_stream);
+        bladerf_close(dev);
+        return 1;
+    }
+    printf(KGRN "OK" KNRM "\n");
+
+    rx_thread_data.dev = dev;
+    rx_thread_data.stream = rx_stream;
+    rx_thread_data.stream_data = &rx_stream_data;
+    pthread_mutex_init(&(rx_thread_data.lock), NULL);
+    pthread_mutex_lock(&(rx_thread_data.lock));
+
+    printf("%-50s", "Creating RX thread... ");
+    status = pthread_create(&rx_thread_pth, NULL, txrx_thread,
+                            &rx_thread_data);
+    if(status) {
+        printf(KRED "Failed: %s" KNRM "\n", strerror(status));
+        enable(&dev, false);
+        bladerf_deinit_stream(rx_stream);
+        bladerf_close(dev);
+        return 1;
+    }
+    printf(KGRN "OK" KNRM "\n");
 
     if(enable(&dev, true)) {
         return 1;
     }
 
-    printf("%-50s", "Streaming TX data... ");
+    printf("%-50s", "Unlocking and joining threads... ");
     fflush(stdout);
-    status = bladerf_stream(dev, tx_stream_data.module,
-                            BLADERF_FORMAT_SC16_Q12, tx_stream);
-    if(status < 0) {
-        printf(KRED "Failed: %s" KNRM "\n", bladerf_strerror(status));
+    pthread_mutex_unlock(&(rx_thread_data.lock));
+    pthread_mutex_unlock(&(tx_thread_data.lock));
+    pthread_join(rx_thread_pth, NULL);
+    pthread_join(tx_thread_pth, NULL);
+    printf(KGRN "OK" KNRM "\n");
+
+    printf("%-50s", "All done, checking TX results... ");
+    fflush(stdout);
+    if(tx_thread_data.rv < 0) {
+        printf(KRED "Failed: %s" KNRM "\n",
+               bladerf_strerror(tx_thread_data.rv));
+        enable(&dev, false);
+        bladerf_deinit_stream(rx_stream);
         bladerf_close(dev);
         return 1;
     }
     printf(KGRN "OK" KNRM "\n");
 
-    printf("%-50s", "Streaming RX data... ");
+
+    printf("%-50s", "          checking RX results... ");
     fflush(stdout);
-    status = bladerf_stream(dev, rx_stream_data.module,
-                            BLADERF_FORMAT_SC16_Q12, rx_stream);
-    if(status < 0) {
-        printf(KRED "Failed: %s" KNRM "\n", bladerf_strerror(status));
+    if(rx_thread_data.rv < 0) {
+        printf(KRED "Failed: %s" KNRM "\n",
+               bladerf_strerror(tx_thread_data.rv));
+        enable(&dev, false);
+        bladerf_deinit_stream(rx_stream);
         bladerf_close(dev);
         return 1;
     }
     printf(KGRN "OK" KNRM "\n");
+
+    printf(KGRN "Success!" KNRM "\n");
 
     enable(&dev, false);
     printf("%-50s", "Deinitialising stream... ");

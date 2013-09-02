@@ -1,3 +1,3 @@
 all:
-	gcc -c main.c
-	gcc main.o -lm -lbladeRF -o radar
+	gcc -g -c main.c
+	gcc -g main.o -lm -lbladeRF -lpthread -o radar

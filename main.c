@@ -12,12 +12,16 @@
 #define KRED "\x1B[31m"
 #define KGRN "\x1B[32m"
 
+char* output_filename = "./bladerf_samples.dat";
+
 struct bladerf_config
 {
     unsigned int tx_freq; // TX Frequency,   300MHz  to 3.8GHz, in Hz
     unsigned int rx_freq; // RX Frequency,   300MHz  to 3.8GHz, in Hz
-    unsigned int bw;      // Bandwidth,      1.5MHz  to  28MHz, in Hz
-    unsigned int sr;      // Sample rate,    400kS/s to 40MS/s, in S/s
+    unsigned int tx_bw;   // TX Bandwidth,   1.5MHz  to  28MHz, in Hz
+    unsigned int rx_bw;   // RX Bandwidth,   1.5MHz  to  28MHz, in Hz
+    unsigned int tx_sr;   // TX Sample rate, 400kS/s to 40MS/s, in S/s
+    unsigned int rx_sr;   // RX Sample rate, 400kS/s to 40MS/s, in S/s
     int txvga1; // Post-LPF gain, default -14dB, -35dB to -4dB, 1dB steps
     int txvga2; // PA gain,       default   0dB,   0dB to 25dB, 1dB steps
     int rxvga1; // Mixer gain,    default  30dB,   5dB to 30dB
@@ -87,9 +91,10 @@ int configure_bladerf(struct bladerf** dev, struct bladerf_config config)
     }
     printf(KGRN "OK" KNRM "\n");
 
-    printf("%-30s %'13uHz... ", "Setting TX bandwidth to:", config.bw);
+    printf("%-30s %'13uHz... ", "Setting TX bandwidth to:", config.tx_bw);
     fflush(stdout);
-    status = bladerf_set_bandwidth(*dev, BLADERF_MODULE_TX, config.bw, &abw);
+    status = bladerf_set_bandwidth(*dev, BLADERF_MODULE_TX,
+                                   config.tx_bw, &abw);
     if(status) {
         printf(KRED "Failed: %s" KNRM "\n", bladerf_strerror(status));
         bladerf_close(*dev);
@@ -98,14 +103,15 @@ int configure_bladerf(struct bladerf** dev, struct bladerf_config config)
     printf(KGRN "OK" KNRM "\n");
 
     printf("%-30s %'13uHz\n", "Actual bandwidth:", abw);
-    if(abw != config.bw) {
+    if(abw != config.tx_bw) {
         printf("Actual bandwidth not equal to desired bandwidth, quitting.\n");
         return 1;
     }
 
-    printf("%-30s %'13uHz... ", "Setting RX bandwidth to:", config.bw);
+    printf("%-30s %'13uHz... ", "Setting RX bandwidth to:", config.rx_bw);
     fflush(stdout);
-    status = bladerf_set_bandwidth(*dev, BLADERF_MODULE_RX, config.bw, &abw);
+    status = bladerf_set_bandwidth(*dev, BLADERF_MODULE_RX,
+                                   config.rx_bw, &abw);
     if(status) {
         printf(KRED "Failed: %s" KNRM "\n", bladerf_strerror(status));
         bladerf_close(*dev);
@@ -114,14 +120,15 @@ int configure_bladerf(struct bladerf** dev, struct bladerf_config config)
     printf(KGRN "OK" KNRM "\n");
 
     printf("%-30s %'13uHz\n", "Actual bandwidth:", abw);
-    if(abw != config.bw) {
+    if(abw != config.rx_bw) {
         printf("Actual bandwidth not equal to desired bandwidth, quitting.\n");
         return 1;
     }
 
-    printf("%-30s %'12usps... ", "Setting TX sampling rate to:", config.sr);
+    printf("%-30s %'12usps... ", "Setting TX sampling rate to:", config.tx_sr);
     fflush(stdout);
-    status = bladerf_set_sample_rate(*dev, BLADERF_MODULE_TX, config.sr, &asr);
+    status = bladerf_set_sample_rate(*dev, BLADERF_MODULE_TX,
+                                     config.tx_sr, &asr);
     if(status) {
         printf(KRED "Failed: %s" KNRM "\n", bladerf_strerror(status));
         bladerf_close(*dev);
@@ -130,15 +137,16 @@ int configure_bladerf(struct bladerf** dev, struct bladerf_config config)
     printf(KGRN "OK" KNRM "\n");
 
     printf("%-30s %'12usps\n", "Actual sampling rate:", asr);
-    if(asr != config.sr) {
+    if(asr != config.tx_sr) {
         printf("Actual sampling rate not equal to desired sampling rate, "
                "quitting.\n");
         return 1;
     }
 
-    printf("%-30s %'12usps... ", "Setting RX sampling rate to:", config.sr);
+    printf("%-30s %'12usps... ", "Setting RX sampling rate to:", config.rx_sr);
     fflush(stdout);
-    status = bladerf_set_sample_rate(*dev, BLADERF_MODULE_RX, config.sr, &asr);
+    status = bladerf_set_sample_rate(*dev, BLADERF_MODULE_RX,
+                                     config.rx_sr, &asr);
     if(status) {
         printf(KRED "Failed: %s" KNRM "\n", bladerf_strerror(status));
         bladerf_close(*dev);
@@ -147,7 +155,7 @@ int configure_bladerf(struct bladerf** dev, struct bladerf_config config)
     printf(KGRN "OK" KNRM "\n");
 
     printf("%-30s %'12usps\n", "Actual sampling rate:", asr);
-    if(asr != config.sr) {
+    if(asr != config.rx_sr) {
         printf("Actual sampling rate not equal to desired sampling rate, "
                "quitting.\n");
         return 1;
@@ -275,65 +283,128 @@ void* stream_cb(struct bladerf *dev, struct bladerf_stream *stream,
 }
 
 
-int main(int argc, char* argv) {
-    struct bladerf *dev;
-    struct bladerf_config cfg;
-    struct bladerf_stream *stream;
-    struct bladerf_stream_data stream_data;
+int setup_rx_stream(struct bladerf* dev, struct bladerf_stream* stream,
+                    struct bladerf_stream_data* stream_data)
+{
     int status;
 
-    cfg.tx_freq = 3410000000;
-    cfg.rx_freq = 3400000000;
-    cfg.bw = 28000000;
-    cfg.sr = 40000000;
-    cfg.txvga1 = -14;
-    cfg.txvga2 = 0;
-    cfg.rxvga1 = 30;
-    cfg.rxvga2 = 3;
-    cfg.lna = BLADERF_LNA_GAIN_MAX;
-
-    if(configure_bladerf(&dev, cfg)) {
-        return 1;
-    }
-
-    printf("%-50s", "Opening /tmp/bladerf_samples.txt...");
+    printf("%-10s %-36s...", "Opening", output_filename);
     fflush(stdout);
-    stream_data.fout = fopen("/tmp/bladerf_samples.txt", "wb");
-    if(!stream_data.fout) {
+    stream_data->fout = fopen(output_filename, "wb");
+    if(!stream_data->fout) {
         printf(KRED "Failed: %s" KNRM "\n", strerror(errno));
         bladerf_close(dev);
         return 1;
     }
     printf(KGRN "OK" KNRM "\n");
 
-    stream_data.num_buffers = 2;
-    stream_data.samples_per_buffer = 1048576;   //  1MS
-    stream_data.samples_left       = 10485760;  // 10MS
-    stream_data.next_buffer = 0;
-    stream_data.module = BLADERF_MODULE_RX;
+    stream_data->next_buffer = 0;
+    stream_data->module = BLADERF_MODULE_RX;
 
-    printf("%-50s", "Initialising data stream... ");
+    printf("%-50s", "Initialising RX data stream... ");
     fflush(stdout);
     status = bladerf_init_stream(&stream, dev, stream_cb,
-                                 &stream_data.buffers, stream_data.num_buffers,
+                                 &stream_data->buffers,
+                                 stream_data->num_buffers,
                                  BLADERF_FORMAT_SC16_Q12,
-                                 stream_data.samples_per_buffer,
-                                 stream_data.num_buffers, &stream_data);
+                                 stream_data->samples_per_buffer,
+                                 stream_data->num_buffers, &stream_data);
     if(status) {
         printf(KRED "Failed: %s" KNRM "\n", bladerf_strerror(status));
         bladerf_close(dev);
         return 1;
     }
     printf(KGRN "OK" KNRM "\n");
+    return 0;
+}
+
+
+int setup_tx_stream(struct bladerf* dev, struct bladerf_stream* stream,
+                    struct bladerf_stream_data* stream_data)
+{
+    int status;
+
+    stream_data->next_buffer = 0;
+    stream_data->module = BLADERF_MODULE_TX;
+
+    printf("%-50s", "Initialising TX data stream... ");
+    fflush(stdout);
+    status = bladerf_init_stream(&stream, dev, stream_cb,
+                                 &stream_data->buffers,
+                                 stream_data->num_buffers,
+                                 BLADERF_FORMAT_SC16_Q12,
+                                 stream_data->samples_per_buffer,
+                                 stream_data->num_buffers, &stream_data);
+    if(status) {
+        printf(KRED "Failed: %s" KNRM "\n", bladerf_strerror(status));
+        bladerf_close(dev);
+        return 1;
+    }
+    printf(KGRN "OK" KNRM "\n");
+    return 0;
+}
+
+
+int main(int argc, char* argv) {
+    struct bladerf *dev;
+    struct bladerf_config cfg;
+    struct bladerf_stream* tx_stream;
+    struct bladerf_stream* rx_stream;
+    struct bladerf_stream_data tx_stream_data;
+    struct bladerf_stream_data rx_stream_data;
+    int status;
+
+    cfg.tx_freq = 3410000000;  // 3.41GHz TX puts us a bit into the band
+    cfg.rx_freq = 3400000000;  // 3.40GHz RX puts the TX signals away from LO
+    cfg.tx_bw = 28000000;      // Full bandwidth on TX for sharp pulses
+    cfg.rx_bw = 28000000;      // Full bandwidth on RX for sharp returns
+    cfg.tx_sr = 10000000;      // 10MS/s will do for TXing pulses
+    cfg.rx_sr = 40000000;      // 40MS/s for RX for best possible resolution
+    cfg.txvga1 = -14;          // Default
+    cfg.txvga2 = 0;            // Default
+    cfg.rxvga1 = 30;           // Default
+    cfg.rxvga2 = 3;            // Default
+    cfg.lna = BLADERF_LNA_GAIN_MAX;
+
+    if(configure_bladerf(&dev, cfg)) {
+        return 1;
+    }
+
+    tx_stream_data.num_buffers        = 1;
+    tx_stream_data.samples_per_buffer = 1048576;   //    1MS
+    tx_stream_data.samples_left       = 2621440;   //  2.5MS
+
+    if(setup_tx_stream(dev, tx_stream, &tx_stream_data)) {
+        return 1;
+    }
+
+    rx_stream_data.num_buffers        = 2;
+    rx_stream_data.samples_per_buffer = 1048576;   //    1MS
+    rx_stream_data.samples_left       = 10485760;  //   10MS
+
+    if(setup_rx_stream(dev, rx_stream, &rx_stream_data)) {
+        return 1;
+    }
 
     if(enable(&dev, true)) {
         return 1;
     }
 
-    printf("%-50s", "Streaming data... ");
+    printf("%-50s", "Streaming TX data... ");
     fflush(stdout);
-    status = bladerf_stream(dev, stream_data.module, BLADERF_FORMAT_SC16_Q12,
-                            stream);
+    status = bladerf_stream(dev, tx_stream_data.module,
+                            BLADERF_FORMAT_SC16_Q12, tx_stream);
+    if(status < 0) {
+        printf(KRED "Failed: %s" KNRM "\n", bladerf_strerror(status));
+        bladerf_close(dev);
+        return 1;
+    }
+    printf(KGRN "OK" KNRM "\n");
+
+    printf("%-50s", "Streaming RX data... ");
+    fflush(stdout);
+    status = bladerf_stream(dev, rx_stream_data.module,
+                            BLADERF_FORMAT_SC16_Q12, rx_stream);
     if(status < 0) {
         printf(KRED "Failed: %s" KNRM "\n", bladerf_strerror(status));
         bladerf_close(dev);
@@ -344,7 +415,7 @@ int main(int argc, char* argv) {
     enable(&dev, false);
     printf("%-50s", "Deinitialising stream... ");
     fflush(stdout);
-    bladerf_deinit_stream(stream);
+    bladerf_deinit_stream(rx_stream);
     printf(KGRN "OK" KNRM "\n");
     printf("%-50s", "Closing device... ");
     fflush(stdout);

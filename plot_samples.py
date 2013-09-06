@@ -1,14 +1,14 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-centre_freq = 3.4E9
+centre_freq = 2.4E9
 sample_rate = 40E6
 
 
 def db(pwr):
     return 10*np.log10(pwr)
 
-with open("/tmp/bladerf_samples.txt", "rb") as f:
+with open("bladerf_samples.dat", "rb") as f:
     data = np.fromfile(f, np.int16, -1).reshape((-1, 2)).astype(np.float)
 
 samples = (data[:, 0] + 1j * data[:, 1]) / 2048.0

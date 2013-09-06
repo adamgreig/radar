@@ -1,8 +1,15 @@
+import json
 import numpy as np
+import matplotlib
+matplotlib.use('QT4Agg')
 import matplotlib.pyplot as plt
+from matplotlib.ticker import EngFormatter
 
-centre_freq = 2.4E9
-sample_rate = 40E6
+with open("bladerf_config.json") as f:
+    cfg = json.loads(f.read())
+
+centre_freq = float(cfg['rx_freq'])
+sample_rate = float(cfg['rx_sr'])
 
 
 def db(pwr):
@@ -17,24 +24,28 @@ spectrum = np.fft.fft(samples)
 power = np.abs(spectrum)
 freqs = np.fft.fftfreq(spectrum.size, 1/sample_rate) + centre_freq
 
-trace = np.abs(samples)
+trace = np.abs(samples) / np.sqrt(2)
 times = np.arange(0, trace.size / sample_rate, 1/sample_rate)
 
-plt.subplot(211)
-plt.plot(times, trace, '.')
+freq_formatter = EngFormatter(unit='Hz', places=3)
+time_formatter = EngFormatter(unit='s', places=3)
+
+ax = plt.subplot(211)
+ax.xaxis.set_major_formatter(time_formatter)
+plt.plot(times, trace, ',')
 plt.xlabel("Time (s)")
 plt.ylabel("Magnitude")
 plt.title("Trace")
 plt.grid()
 
-plt.subplot(212)
-plt.semilogy(freqs, power, '.')
+ax = plt.subplot(212)
+ax.xaxis.set_major_formatter(freq_formatter)
+plt.semilogy(freqs, power, ',')
 locs, labels = plt.xticks()
-plt.xticks(locs, ["{0:.3f}GHz".format(loc / 1E9) for loc in locs])
 locs, labels = plt.yticks()
 plt.yticks(locs, ["{0}dB".format(int(db(loc))) for loc in locs])
-plt.xlabel("Power")
-plt.ylabel("Frequency")
+plt.xlabel("Frequency")
+plt.ylabel("Power")
 
 plt.title("Power Spectrum")
 plt.grid()

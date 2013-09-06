@@ -13,7 +13,8 @@
 #define KRED "\x1B[31m"
 #define KGRN "\x1B[32m"
 
-char* output_filename = "./bladerf_samples.dat";
+char* output_samples_filename = "./bladerf_samples.dat";
+char* output_config_filename  = "./bladerf_config.json";
 
 struct bladerf_config
 {
@@ -48,6 +49,37 @@ struct bladerf_thread_data
     struct bladerf_stream_data* stream_data;
     int rv;
 };
+
+
+int write_config(struct bladerf_config* config)
+{
+    printf("%-20s %-29s", "Writing config to", output_config_filename);
+    fflush(stdout);
+    FILE* fout = fopen(output_config_filename, "w");
+    if(!fout) {
+        printf(KRED "Failed: %s" KNRM "\n", strerror(errno));
+        return 1;
+    }
+
+    fprintf(fout, "{\n");
+    fprintf(fout, "    \"tx_freq\": %u,\n", config->tx_freq);
+    fprintf(fout, "    \"rx_freq\": %u,\n", config->rx_freq);
+    fprintf(fout, "    \"tx_bw\": %u,\n", config->tx_bw);
+    fprintf(fout, "    \"rx_bw\": %u,\n", config->rx_bw);
+    fprintf(fout, "    \"tx_sr\": %u,\n", config->tx_sr);
+    fprintf(fout, "    \"rx_sr\": %u,\n", config->rx_sr);
+    fprintf(fout, "    \"txvga1\": %d,\n", config->txvga1);
+    fprintf(fout, "    \"txvga2\": %d,\n", config->txvga2);
+    fprintf(fout, "    \"rxvga1\": %d,\n", config->rxvga1);
+    fprintf(fout, "    \"rxvga2\": %d\n", config->rxvga2);
+    fprintf(fout, "}\n");
+
+    fclose(fout);
+
+    printf(KGRN "OK" KNRM "\n");
+
+    return 0;
+}
 
 
 int configure_bladerf(struct bladerf** dev, struct bladerf_config* config)
@@ -271,8 +303,6 @@ void* stream_cb(struct bladerf *dev, struct bladerf_stream *stream,
     size_t i, j;
 
     if(data->module == BLADERF_MODULE_RX) {
-        /*printf("r");*/
-        /*fflush(stdout);*/
         for(i=0; i<n_samples; i++) {
             *sample &= 0x0fff;
             if(*sample & 0x0800)
@@ -284,13 +314,16 @@ void* stream_cb(struct bladerf *dev, struct bladerf_stream *stream,
             sample += 2;
         }
     } else {
-        /*printf("t");*/
-        /*fflush(stdout);*/
         sample = data->buffers[data->next_buffer];
+        /*
         for(i=0; i<n_samples / 200; i++) {
             for(j=0; j<10; j++) {
                 sample[i*200 + j*2] = 2047;
             }
+        }
+        */
+        for(i=0; i<n_samples; i++) {
+            sample[i*2] = 2047;
         }
     }
 
@@ -310,9 +343,9 @@ int setup_rx_stream(struct bladerf* dev, struct bladerf_stream** stream,
 {
     int status;
 
-    printf("%-10s %-39s", "Opening", output_filename);
+    printf("%-10s %-39s", "Opening", output_samples_filename);
     fflush(stdout);
-    stream_data->fout = fopen(output_filename, "wb");
+    stream_data->fout = fopen(output_samples_filename, "wb");
     if(!stream_data->fout) {
         printf(KRED "Failed: %s" KNRM "\n", strerror(errno));
         bladerf_close(dev);
@@ -403,11 +436,20 @@ int main(int argc, char* argv) {
     cfg->rx_bw = 28000000;      // Full bandwidth on RX for sharp returns
     cfg->tx_sr = 40000000;      // 40MS/s for TX for short pulses
     cfg->rx_sr = 40000000;      // 40MS/s for RX for best possible resolution
-    cfg->txvga1 = -14;          // Default
-    cfg->txvga2 = 0;            // Default
-    cfg->rxvga1 = 30;           // Default
-    cfg->rxvga2 = 3;            // Default
+    cfg->txvga1 = -14;          // Default post LPF gain
+    cfg->txvga2 = 6;            // PA power (main power adjust)
+    cfg->rxvga1 = 30;           // Default mixer gain
+    cfg->rxvga2 = 3;            // post-LPF gain (main gain adjust)
     cfg->lna = BLADERF_LNA_GAIN_MAX;
+
+    if(write_config(cfg)) {
+        if(cfg) free(cfg);
+        if(tx_stream_data) free(tx_stream_data);
+        if(rx_stream_data) free(rx_stream_data);
+        if(tx_thread_data) free(tx_thread_data);
+        if(rx_thread_data) free(rx_thread_data);
+        return 1;
+    }
 
     if(configure_bladerf(&dev, cfg)) {
         if(cfg) free(cfg);
@@ -418,8 +460,8 @@ int main(int argc, char* argv) {
         return 1;
     }
 
-    tx_stream_data->num_buffers        = 3;
-    tx_stream_data->samples_per_buffer = 262144;    //  256kS
+    tx_stream_data->num_buffers        = 32;
+    tx_stream_data->samples_per_buffer = 16384;
     tx_stream_data->samples_left       = 10485760;  //   10MS
 
     if(setup_tx_stream(dev, &tx_stream, tx_stream_data)) {
@@ -431,8 +473,8 @@ int main(int argc, char* argv) {
         return 1;
     }
 
-    rx_stream_data->num_buffers        = 3;
-    rx_stream_data->samples_per_buffer = 262144;    //  256kS
+    rx_stream_data->num_buffers        = 32;
+    rx_stream_data->samples_per_buffer = 16384;
     rx_stream_data->samples_left       = 10485760;  //   10MS
 
     if(setup_rx_stream(dev, &rx_stream, rx_stream_data)) {

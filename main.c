@@ -1,13 +1,37 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <signal.h>
+#include <string.h>
 #include <unistd.h>
 #include <locale.h>
 #include <errno.h>
-#include <string.h>
 #include <math.h>
 #include <pthread.h>
 #include "libbladeRF.h"
+
+#define TXFREQ 3410000000
+#define TXBW   28000000
+#define TXSR   40000000
+#define TXVGA1 -4
+#define TXVGA2 25
+
+#define RXFREQ 3400000000
+#define RXBW   28000000
+#define RXSR   40000000
+#define RXVGA1 30
+#define RXVGA2 30
+#define LNA BLADERF_LNA_GAIN_MAX
+
+#define TX_N_BUFFERS          48
+#define TX_SAMPLES_PER_BUFFER 2048
+#define TX_N_SAMPLES          (280*1024)
+#define TX_N_TRANSFERS        32
+
+#define RX_SAMPLES_PER_BUFFER 2048
+#define RX_N_SAMPLES          (250*1024)
+#define RX_N_BUFFERS          (RX_N_SAMPLES / RX_SAMPLES_PER_BUFFER)
+#define RX_N_TRANSFERS        32
 
 #define KNRM "\x1B[0m"
 #define KRED "\x1B[31m"
@@ -344,8 +368,10 @@ void fill_tx_buffers(struct bladerf_stream_data* stream_data)
     int16_t* samples;
     for(i=0; i<stream_data->num_buffers; i++) {
         samples = stream_data->buffers[i];
-        for(j=0; j<stream_data->samples_per_buffer; j++) {
-            samples[j*2] = 2047;
+        memset(samples, 0,
+               stream_data->samples_per_buffer * sizeof(*samples) * 2);
+        for(j=0; j<(stream_data->samples_per_buffer / 256); j++) {
+            samples[j*2*256] = 2047;
         }
     }
 }
@@ -384,8 +410,10 @@ void* txrx_thread(void* arg)
 {
     struct bladerf_thread_data* thread_data = (struct bladerf_thread_data*)arg;
 
+    /*
     while(*(thread_data->waiting))
         usleep(1);
+    */
 
     thread_data->rv = bladerf_stream(thread_data->stream,
                                      thread_data->stream_data->module);
@@ -440,9 +468,14 @@ int save_rx_data(struct bladerf_stream_data* stream_data)
     return 0;
 }
 
+void ignore_sigint(int sig)
+{
+    return;
+}
+
 
 int main(int argc, char** argv) {
-    int status, threads_waiting = 1;
+    int status, threads_waiting = 1, quick;
     int16_t* rx_data;
     struct bladerf* dev;
     struct bladerf_config* cfg;
@@ -455,46 +488,61 @@ int main(int argc, char** argv) {
     pthread_t tx_thread_pth;
     pthread_t rx_thread_pth;
 
+    signal(SIGINT, ignore_sigint);
+
     cfg = malloc(sizeof(struct bladerf_config));
     tx_stream_data = malloc(sizeof(struct bladerf_stream_data));
     rx_stream_data = malloc(sizeof(struct bladerf_stream_data));
     tx_thread_data = malloc(sizeof(struct bladerf_thread_data));
     rx_thread_data = malloc(sizeof(struct bladerf_thread_data));
 
-    cfg->tx_freq = 3410000000;  // 3.41GHz TX puts us a bit into the band
-    cfg->rx_freq = 3400000000;  // 3.40GHz RX puts the TX signals away from LO
-    cfg->tx_bw = 28000000;      // Full bandwidth on TX for sharp pulses
-    cfg->rx_bw = 28000000;      // Full bandwidth on RX for sharp returns
-    cfg->tx_sr = 40000000;      // 40MS/s for TX for short pulses
-    cfg->rx_sr = 40000000;      // 40MS/s for RX for best possible resolution
-    cfg->txvga1 = -14;          // Default post LPF gain
-    cfg->txvga2 = 6;            // PA power (main power adjust)
-    cfg->rxvga1 = 30;           // Default mixer gain
-    cfg->rxvga2 = 3;            // post-LPF gain (main gain adjust)
-    cfg->lna = BLADERF_LNA_GAIN_MAX;
+    cfg->tx_freq = TXFREQ;
+    cfg->rx_freq = RXFREQ;
+    cfg->tx_bw = TXBW;
+    cfg->rx_bw = RXBW;
+    cfg->tx_sr = TXSR;
+    cfg->rx_sr = RXSR;
+    cfg->txvga1 = TXVGA1;
+    cfg->txvga2 = TXVGA2;
+    cfg->rxvga1 = RXVGA1;
+    cfg->rxvga2 = RXVGA2;
+    cfg->lna = LNA;
 
-    if(write_config(cfg)) {
-        if(cfg) free(cfg);
-        if(tx_stream_data) free(tx_stream_data);
-        if(rx_stream_data) free(rx_stream_data);
-        if(tx_thread_data) free(tx_thread_data);
-        if(rx_thread_data) free(rx_thread_data);
-        return 1;
+    if(argc == 2 && argv[1][0] == 'q') {
+        quick = 1;
+    } else {
+        quick = 0;
     }
 
-    if(configure_bladerf(&dev, cfg)) {
-        if(cfg) free(cfg);
-        if(tx_stream_data) free(tx_stream_data);
-        if(rx_stream_data) free(rx_stream_data);
-        if(tx_thread_data) free(tx_thread_data);
-        if(rx_thread_data) free(rx_thread_data);
-        return 1;
+    if(!quick) {
+        if(write_config(cfg)) {
+            if(cfg) free(cfg);
+            if(tx_stream_data) free(tx_stream_data);
+            if(rx_stream_data) free(rx_stream_data);
+            if(tx_thread_data) free(tx_thread_data);
+            if(rx_thread_data) free(rx_thread_data);
+            return 1;
+        }
+
+        if(configure_bladerf(&dev, cfg)) {
+            if(cfg) free(cfg);
+            if(tx_stream_data) free(tx_stream_data);
+            if(rx_stream_data) free(rx_stream_data);
+            if(tx_thread_data) free(tx_thread_data);
+            if(rx_thread_data) free(rx_thread_data);
+            return 1;
+        }
+    } else {
+        status = bladerf_open(&dev, NULL);
+        if(status) {
+            return 1;
+        }
     }
 
-    tx_stream_data->num_buffers        = 32;
-    tx_stream_data->samples_per_buffer = 16384;
-    tx_stream_data->samples_left       = 10485760;  //   10MS
-    tx_stream_data->num_transfers      = 32;
+    tx_stream_data->num_buffers        = TX_N_BUFFERS;
+    tx_stream_data->samples_per_buffer = TX_SAMPLES_PER_BUFFER;
+    tx_stream_data->samples_left       = TX_N_SAMPLES;
+    tx_stream_data->num_transfers      = TX_N_TRANSFERS;
 
     if(setup_tx_stream(dev, &tx_stream, tx_stream_data)) {
         if(cfg) free(cfg);
@@ -505,10 +553,10 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    rx_stream_data->num_buffers        = 640;
-    rx_stream_data->samples_per_buffer = 16384;
-    rx_stream_data->samples_left       = 10485760;  //   10MS
-    rx_stream_data->num_transfers      = 32;
+    rx_stream_data->num_buffers        = RX_N_BUFFERS;
+    rx_stream_data->samples_per_buffer = RX_SAMPLES_PER_BUFFER;
+    rx_stream_data->samples_left       = RX_N_SAMPLES;
+    rx_stream_data->num_transfers      = RX_N_TRANSFERS;
 
     if(setup_rx_stream(dev, &rx_stream, rx_stream_data)) {
         bladerf_deinit_stream(tx_stream);
@@ -554,6 +602,8 @@ int main(int argc, char** argv) {
         return 1;
     }
     printf(KGRN "OK" KNRM "\n");
+
+    usleep(100);
 
     rx_thread_data->dev = dev;
     rx_thread_data->stream = rx_stream;

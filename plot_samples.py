@@ -20,21 +20,24 @@ with open("bladerf_samples.dat", "rb") as f:
 
 samples = (data[:, 0] + 1j * data[:, 1]) / 2048.0
 
+samples -= np.mean(samples)
+
 spectrum = np.fft.fft(samples)
 power = np.abs(spectrum)
 freqs = np.fft.fftfreq(spectrum.size, 1/sample_rate) + centre_freq
 
-trace = np.abs(samples) / np.sqrt(2)
-times = np.arange(0, trace.size / sample_rate, 1/sample_rate)
+#trace = np.abs(samples) / np.sqrt(2)
+trace = np.real(samples)
+times = np.linspace(0, trace.size / sample_rate, trace.size)
 
 freq_formatter = EngFormatter(unit='Hz', places=3)
 time_formatter = EngFormatter(unit='s', places=3)
 
 ax = plt.subplot(211)
 ax.xaxis.set_major_formatter(time_formatter)
-plt.plot(times, trace, ',')
+plt.plot(times, trace, '.-')
 plt.xlabel("Time (s)")
-plt.ylabel("Magnitude")
+plt.ylabel("In-Phase Component")
 plt.title("Trace")
 plt.grid()
 

@@ -38,7 +38,7 @@ struct bladerf_stream_data
     size_t         samples_per_buffer;
     unsigned int   next_buffer;
     bladerf_module module;
-    FILE           *fout;
+    int16_t        *rx_data;
     int            samples_left;
 };
 
@@ -47,6 +47,7 @@ struct bladerf_thread_data
     struct bladerf* dev;
     struct bladerf_stream* stream;
     struct bladerf_stream_data* stream_data;
+    int *waiting;
     int rv;
 };
 
@@ -303,19 +304,13 @@ void* stream_cb(struct bladerf *dev, struct bladerf_stream *stream,
     size_t i, j;
 
     if(data->module == BLADERF_MODULE_RX) {
-        for(i=0; i<n_samples; i++) {
-            *sample &= 0x0fff;
-            if(*sample & 0x0800)
-                *sample |= 0xf000;
-            *(sample+1) &= 0x0fff;
-            if(*(sample+1) & 0x0800)
-                *(sample+1) |= 0xf000;
-            fwrite(sample, 2, 2, data->fout);
-            sample += 2;
-        }
+        memcpy(data->rx_data, samples, n_samples * sizeof(*data->rx_data) * 2);
+        data->rx_data += n_samples * 2;
     } else {
         sample = data->buffers[data->next_buffer];
         /*
+        // Generate pulses every 200 samples. Removed for now, just generate
+        // full carriers for testing (below).
         for(i=0; i<n_samples / 200; i++) {
             for(j=0; j<10; j++) {
                 sample[i*200 + j*2] = 2047;
@@ -342,16 +337,6 @@ int setup_rx_stream(struct bladerf* dev, struct bladerf_stream** stream,
                     struct bladerf_stream_data* stream_data)
 {
     int status;
-
-    printf("%-10s %-39s", "Opening", output_samples_filename);
-    fflush(stdout);
-    stream_data->fout = fopen(output_samples_filename, "wb");
-    if(!stream_data->fout) {
-        printf(KRED "Failed: %s" KNRM "\n", strerror(errno));
-        bladerf_close(dev);
-        return 1;
-    }
-    printf(KGRN "OK" KNRM "\n");
 
     stream_data->next_buffer = 0;
     stream_data->module = BLADERF_MODULE_RX;
@@ -404,6 +389,9 @@ void* txrx_thread(void* arg)
 {
     struct bladerf_thread_data* thread_data = (struct bladerf_thread_data*)arg;
 
+    while(*(thread_data->waiting))
+        usleep(1);
+
     thread_data->rv = bladerf_stream(thread_data->stream,
                                      thread_data->stream_data->module);
 
@@ -411,8 +399,47 @@ void* txrx_thread(void* arg)
 }
 
 
-int main(int argc, char* argv) {
-    int status;
+int save_rx_data(int16_t* rx_data, size_t n_samples)
+{
+    FILE* fout;
+    size_t i, written;
+    int16_t* sample = rx_data;
+
+    for(i=0; i<n_samples; i++) {
+        *sample &= 0x0fff;
+        if(*sample & 0x0800)
+            *sample |= 0xf000;
+        *(sample+1) &= 0x0fff;
+        if(*(sample+1) & 0x0800)
+            *(sample+1) |= 0xf000;
+        sample += 2;
+    }
+
+    printf("%-10s %-39s", "Opening", output_samples_filename);
+    fflush(stdout);
+    fout = fopen(output_samples_filename, "wb");
+    if(!fout) {
+        printf(KRED "Failed: %s" KNRM "\n", strerror(errno));
+        return 1;
+    }
+    printf(KGRN "OK" KNRM "\n");
+
+    printf("%-50s", "Writing data... ");
+    written = fwrite(rx_data, sizeof(*rx_data), n_samples * 2, fout);
+    if(written != n_samples * 2) {
+        printf(KRED "Failed: %s" KNRM "\n", strerror(errno));
+    }
+    printf(KGRN "OK" KNRM "\n");
+
+    fclose(fout);
+
+    return 0;
+}
+
+
+int main(int argc, char** argv) {
+    int status, threads_waiting = 1;
+    int16_t* rx_data;
     struct bladerf* dev;
     struct bladerf_config* cfg;
     struct bladerf_stream* tx_stream;
@@ -430,8 +457,8 @@ int main(int argc, char* argv) {
     tx_thread_data = malloc(sizeof(struct bladerf_thread_data));
     rx_thread_data = malloc(sizeof(struct bladerf_thread_data));
 
-    cfg->tx_freq = 2410000000;  // 2.41GHz TX puts us a bit into the band
-    cfg->rx_freq = 2400000000;  // 2.40GHz RX puts the TX signals away from LO
+    cfg->tx_freq = 3410000000;  // 3.41GHz TX puts us a bit into the band
+    cfg->rx_freq = 3400000000;  // 3.40GHz RX puts the TX signals away from LO
     cfg->tx_bw = 28000000;      // Full bandwidth on TX for sharp pulses
     cfg->rx_bw = 28000000;      // Full bandwidth on RX for sharp returns
     cfg->tx_sr = 40000000;      // 40MS/s for TX for short pulses
@@ -477,6 +504,22 @@ int main(int argc, char* argv) {
     rx_stream_data->samples_per_buffer = 16384;
     rx_stream_data->samples_left       = 10485760;  //   10MS
 
+    printf("%-50s", "Allocating memory for RX data... ");
+    rx_data = malloc(2 * sizeof(*rx_data) * rx_stream_data->samples_left);
+    if(rx_data == NULL) {
+        printf(KRED "Failed: %s" KNRM "\n", strerror(errno));
+        bladerf_deinit_stream(tx_stream);
+        if(cfg) free(cfg);
+        if(tx_stream_data) free(tx_stream_data);
+        if(rx_stream_data) free(rx_stream_data);
+        if(tx_thread_data) free(tx_thread_data);
+        if(rx_thread_data) free(rx_thread_data);
+        return 1;
+    }
+    printf(KGRN "OK" KNRM "\n");
+
+    rx_stream_data->rx_data            = rx_data;
+
     if(setup_rx_stream(dev, &rx_stream, rx_stream_data)) {
         bladerf_deinit_stream(tx_stream);
         if(cfg) free(cfg);
@@ -503,9 +546,8 @@ int main(int argc, char* argv) {
     tx_thread_data->dev = dev;
     tx_thread_data->stream = tx_stream;
     tx_thread_data->stream_data = tx_stream_data;
-    rx_thread_data->dev = dev;
-    rx_thread_data->stream = rx_stream;
-    rx_thread_data->stream_data = rx_stream_data;
+    tx_thread_data->waiting = &threads_waiting;
+    tx_thread_data->rv = 1;
 
     printf("%-50s", "Creating TX thread... ");
     status = pthread_create(&tx_thread_pth, NULL, txrx_thread,
@@ -522,6 +564,12 @@ int main(int argc, char* argv) {
         return 1;
     }
     printf(KGRN "OK" KNRM "\n");
+
+    rx_thread_data->dev = dev;
+    rx_thread_data->stream = rx_stream;
+    rx_thread_data->stream_data = rx_stream_data;
+    rx_thread_data->waiting = &threads_waiting;
+    rx_thread_data->rv = 1;
 
     printf("%-50s", "Creating RX thread... ");
     status = pthread_create(&rx_thread_pth, NULL, txrx_thread,
@@ -540,7 +588,11 @@ int main(int argc, char* argv) {
     }
     printf(KGRN "OK" KNRM "\n");
 
-    printf("%-50s", "Joining threads... ");
+    printf("%-50s", "Starting processing... ");
+    threads_waiting = 0;
+    printf(KGRN "OK" KNRM "\n");
+
+    printf("%-50s", "Waiting for completion... ");
     fflush(stdout);
     pthread_join(rx_thread_pth, NULL);
     pthread_join(tx_thread_pth, NULL);
@@ -592,6 +644,9 @@ int main(int argc, char* argv) {
     fflush(stdout);
     bladerf_close(dev);
     printf(KGRN "OK" KNRM "\n");
+
+    save_rx_data(rx_data, 10485760);
+
     printf("%-50s", "Freeing memory... ");
     fflush(stdout);
     if(cfg) free(cfg);
@@ -599,6 +654,7 @@ int main(int argc, char* argv) {
     if(rx_stream_data) free(rx_stream_data);
     if(tx_thread_data) free(tx_thread_data);
     if(rx_thread_data) free(rx_thread_data);
+    if(rx_data) free(rx_data);
     printf(KGRN "OK" KNRM "\n");
     return 0;
 }

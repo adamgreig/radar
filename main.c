@@ -36,9 +36,9 @@ struct bladerf_stream_data
     void           **buffers;
     size_t         num_buffers;
     size_t         samples_per_buffer;
+    size_t         num_transfers;
     unsigned int   next_buffer;
     bladerf_module module;
-    int16_t        *rx_data;
     int            samples_left;
 };
 
@@ -300,27 +300,6 @@ void* stream_cb(struct bladerf *dev, struct bladerf_stream *stream,
                 void *user_data)
 {
     struct bladerf_stream_data *data = user_data; 
-    int16_t *sample = samples;
-    size_t i, j;
-
-    if(data->module == BLADERF_MODULE_RX) {
-        memcpy(data->rx_data, samples, n_samples * sizeof(*data->rx_data) * 2);
-        data->rx_data += n_samples * 2;
-    } else {
-        sample = data->buffers[data->next_buffer];
-        /*
-        // Generate pulses every 200 samples. Removed for now, just generate
-        // full carriers for testing (below).
-        for(i=0; i<n_samples / 200; i++) {
-            for(j=0; j<10; j++) {
-                sample[i*200 + j*2] = 2047;
-            }
-        }
-        */
-        for(i=0; i<n_samples; i++) {
-            sample[i*2] = 2047;
-        }
-    }
 
     data->samples_left -= n_samples;
     if(data->samples_left <= 0) {
@@ -348,7 +327,7 @@ int setup_rx_stream(struct bladerf* dev, struct bladerf_stream** stream,
                                  stream_data->num_buffers,
                                  BLADERF_FORMAT_SC16_Q12,
                                  stream_data->samples_per_buffer,
-                                 stream_data->num_buffers, stream_data);
+                                 stream_data->num_transfers, stream_data);
     if(status) {
         printf(KRED "Failed: %s" KNRM "\n", bladerf_strerror(status));
         bladerf_close(dev);
@@ -356,6 +335,19 @@ int setup_rx_stream(struct bladerf* dev, struct bladerf_stream** stream,
     }
     printf(KGRN "OK" KNRM "\n");
     return 0;
+}
+
+
+void fill_tx_buffers(struct bladerf_stream_data* stream_data)
+{
+    size_t i, j;
+    int16_t* samples;
+    for(i=0; i<stream_data->num_buffers; i++) {
+        samples = stream_data->buffers[i];
+        for(j=0; j<stream_data->samples_per_buffer; j++) {
+            samples[j*2] = 2047;
+        }
+    }
 }
 
 
@@ -374,12 +366,15 @@ int setup_tx_stream(struct bladerf* dev, struct bladerf_stream** stream,
                                  stream_data->num_buffers,
                                  BLADERF_FORMAT_SC16_Q12,
                                  stream_data->samples_per_buffer,
-                                 stream_data->num_buffers, stream_data);
+                                 stream_data->num_transfers, stream_data);
     if(status) {
         printf(KRED "Failed: %s" KNRM "\n", bladerf_strerror(status));
         bladerf_close(dev);
         return 1;
     }
+
+    fill_tx_buffers(stream_data);
+
     printf(KGRN "OK" KNRM "\n");
     return 0;
 }
@@ -399,21 +394,11 @@ void* txrx_thread(void* arg)
 }
 
 
-int save_rx_data(int16_t* rx_data, size_t n_samples)
+int save_rx_data(struct bladerf_stream_data* stream_data)
 {
     FILE* fout;
-    size_t i, written;
-    int16_t* sample = rx_data;
-
-    for(i=0; i<n_samples; i++) {
-        *sample &= 0x0fff;
-        if(*sample & 0x0800)
-            *sample |= 0xf000;
-        *(sample+1) &= 0x0fff;
-        if(*(sample+1) & 0x0800)
-            *(sample+1) |= 0xf000;
-        sample += 2;
-    }
+    size_t i, j, written;
+    int16_t* samples;
 
     printf("%-10s %-39s", "Opening", output_samples_filename);
     fflush(stdout);
@@ -425,10 +410,29 @@ int save_rx_data(int16_t* rx_data, size_t n_samples)
     printf(KGRN "OK" KNRM "\n");
 
     printf("%-50s", "Writing data... ");
-    written = fwrite(rx_data, sizeof(*rx_data), n_samples * 2, fout);
-    if(written != n_samples * 2) {
-        printf(KRED "Failed: %s" KNRM "\n", strerror(errno));
+
+    for(i=0; i<stream_data->num_buffers; i++) {
+        samples = stream_data->buffers[i];
+        for(j=0; j<stream_data->samples_per_buffer; j++) {
+            *samples &= 0x0fff;
+            if(*samples & 0x0800)
+                *samples |= 0xf000;
+            *(samples+1) &= 0x0fff;
+            if(*(samples+1) & 0x0800)
+                *(samples+1) |= 0xf000;
+            samples += 2;
+        }
+        samples = stream_data->buffers[i];
+
+        written = fwrite(samples, sizeof(*samples),
+                         stream_data->samples_per_buffer * 2, fout);
+        if(written != stream_data->samples_per_buffer * 2) {
+            printf(KRED "Failed: %s" KNRM "\n", strerror(errno));
+        }
+
     }
+
+
     printf(KGRN "OK" KNRM "\n");
 
     fclose(fout);
@@ -490,6 +494,7 @@ int main(int argc, char** argv) {
     tx_stream_data->num_buffers        = 32;
     tx_stream_data->samples_per_buffer = 16384;
     tx_stream_data->samples_left       = 10485760;  //   10MS
+    tx_stream_data->num_transfers      = 32;
 
     if(setup_tx_stream(dev, &tx_stream, tx_stream_data)) {
         if(cfg) free(cfg);
@@ -500,25 +505,10 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    rx_stream_data->num_buffers        = 32;
+    rx_stream_data->num_buffers        = 640;
     rx_stream_data->samples_per_buffer = 16384;
     rx_stream_data->samples_left       = 10485760;  //   10MS
-
-    printf("%-50s", "Allocating memory for RX data... ");
-    rx_data = malloc(2 * sizeof(*rx_data) * rx_stream_data->samples_left);
-    if(rx_data == NULL) {
-        printf(KRED "Failed: %s" KNRM "\n", strerror(errno));
-        bladerf_deinit_stream(tx_stream);
-        if(cfg) free(cfg);
-        if(tx_stream_data) free(tx_stream_data);
-        if(rx_stream_data) free(rx_stream_data);
-        if(tx_thread_data) free(tx_thread_data);
-        if(rx_thread_data) free(rx_thread_data);
-        return 1;
-    }
-    printf(KGRN "OK" KNRM "\n");
-
-    rx_stream_data->rx_data            = rx_data;
+    rx_stream_data->num_transfers      = 32;
 
     if(setup_rx_stream(dev, &rx_stream, rx_stream_data)) {
         bladerf_deinit_stream(tx_stream);
@@ -635,6 +625,8 @@ int main(int argc, char** argv) {
 
     printf(KGRN "Success!" KNRM "\n");
 
+    save_rx_data(rx_stream_data);
+
     enable(dev, false);
     printf("%-50s", "Deinitialising stream... ");
     fflush(stdout);
@@ -644,8 +636,6 @@ int main(int argc, char** argv) {
     fflush(stdout);
     bladerf_close(dev);
     printf(KGRN "OK" KNRM "\n");
-
-    save_rx_data(rx_data, 10485760);
 
     printf("%-50s", "Freeing memory... ");
     fflush(stdout);
